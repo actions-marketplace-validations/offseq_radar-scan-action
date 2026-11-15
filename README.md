@@ -24,7 +24,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: offseq/radar-scan-action@v1
         with:
           api-key: ${{ secrets.RADAR_API_KEY }}
@@ -38,9 +38,10 @@ Get an API key in [Console → Settings](https://radar.offseq.com/console) and s
 
 | Input | Default | |
 |---|---|---|
-| `api-key` | – | Radar API key. Required. |
+| `api-key` | – | Radar API key. On fork and Dependabot pull requests, which get no secrets, an empty key skips the scan with a warning (`skipped` is `true`); anywhere else an empty key fails the step. |
 | `file` | – | SBOM or lockfile to scan. Required. |
 | `fail-on` | empty | `critical`, `high`, `medium`, `low`, `kev` or `exploited`. Only version-confirmed findings count. Empty never fails. |
+| `fail-on-incomplete` | `true` | Fail when the gate could not evaluate every package, e.g. over the server's candidate cap. The job summary lists the packages. |
 | `upload-sarif` | `true` | Upload SARIF to code scanning. Needs `security-events: write`. |
 | `api-url` | `https://radar.offseq.com` | Radar base URL. |
 
@@ -49,6 +50,7 @@ Get an API key in [Console → Settings](https://radar.offseq.com/console) and s
 | Output | |
 |---|---|
 | `gate-tripped` | `true` when `fail-on` matched. |
+| `gate-incomplete` | `true` when the gate could not evaluate every package. |
 | `sarif-file` | Path of the SARIF report. |
 
 ## Supported files
