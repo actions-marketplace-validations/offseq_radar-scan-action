@@ -41,6 +41,8 @@ Get an API key in [Console → Settings](https://radar.offseq.com/console) and s
 
 With no `file` or `files`, the action scans every supported file tracked in the repository. On a pull request it fetches the base commit and sends each file with its state: unchanged, changed (with the base version) or added. Radar matches the packages the pull request adds or removes, so a finding is **new** only when the pull request brings in a vulnerable package, and **fixed** when it removes or upgrades one. A version bump that still leaves the same CVE open is not new.
 
+The checkout must be the pull request head or its merge commit, which is what `actions/checkout` gives on `pull_request`. Under `pull_request_target` it checks out the base branch, so check out `${{ github.event.pull_request.head.sha }}` there; otherwise the step fails rather than comparing the base with itself. Symlinked files are never read.
+
 Fork and Dependabot pull requests get no secrets; there an empty key skips the scan with a warning. Their token is read-only, so the comment is skipped with a warning too. Anywhere else an empty key fails the step.
 
 ## Inputs

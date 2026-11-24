@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { prepare } from '../scripts/prepare.mjs';
-import { commit, repo, tmp, write } from './helpers.mjs';
+import { commit, git, repo, tmp, write } from './helpers.mjs';
 
 const opts = (cwd, extra = {}) => ({ cwd, file: '', files: '', config: '.github/radar.yml', baseSha: '', ...extra });
 
@@ -67,6 +68,20 @@ test('an untracked new file is not discovered, and more than 50 files is refused
   const many = Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`p${i}/yarn.lock`, 'y']));
   commit(root, many);
   assert.throws(() => prepare(opts(root)), /53 files to scan, more than 50/);
+});
+
+test('symlinks and files missing on disk are never read', () => {
+  const root = repo();
+  commit(root, { 'real/yarn.lock': 'y', 'sparse/uv.lock': 'u' });
+  symlinkSync('.git/config', join(root, 'package-lock.json'));
+  symlinkSync('real', join(root, 'linked'));
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', 'links');
+  rmSync(join(root, 'sparse/uv.lock'));
+  assert.deepEqual(prepare(opts(root)).files.map(f => f.filename), ['real/yarn.lock']);
+  assert.deepEqual(prepare(opts(root, { files: '**/*.lock*' })).files.map(f => f.filename), ['real/yarn.lock']);
+  assert.throws(() => prepare(opts(root, { file: 'package-lock.json' })), /not a regular file/);
+  assert.throws(() => prepare(opts(root, { file: 'linked/yarn.lock' })), /not a regular file/);
 });
 
 test('fails outside a git checkout', () => {

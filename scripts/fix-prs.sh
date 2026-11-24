@@ -5,6 +5,14 @@ export GH_HOST="${GITHUB_SERVER_URL#https://}"
 fix="$GITHUB_ACTION_PATH/scripts/fix.mjs"
 tmp="$RUNNER_TEMP/radar-fix"
 mkdir -p "$tmp"
+urls=()
+start=
+# shellcheck disable=SC2329
+finish() {
+  [ -z "$start" ] || { git reset -q "$start" && git checkout -q "${origin_ref:-$start}"; }
+  echo "fix-prs=$(printf '%s\n' ${urls[@]+"${urls[@]}"} | jq -Rsc 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+}
+trap finish EXIT
 
 case "$GITHUB_EVENT_NAME" in
   push|schedule|workflow_dispatch) ;;
@@ -18,9 +26,8 @@ fi
 
 root=$(git rev-parse --show-toplevel)
 cd "$root"
-start=$(git rev-parse HEAD)
 origin_ref=$(git symbolic-ref -q --short HEAD || true)
-trap 'git reset -q "$start" && git checkout -q "${origin_ref:-$start}"' EXIT
+start=$(git rev-parse HEAD)
 git checkout -q --detach
 git config user.name 'github-actions[bot]'
 git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -28,10 +35,8 @@ git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 config_json=null
 [ -f "$RADAR_CONFIG" ] && config_json=$(jq -Rs . "$RADAR_CONFIG")
 
-mapfile -t locks < <(jq -r '.files[].filename | select(test("(^|/)package-lock\\.json$"))' "$RADAR_FILES")
-urls=()
 failed=0
-for lock in "${locks[@]}"; do
+while IFS= read -r lock <&3; do
   dir=$(dirname "$lock")
   manifest="$dir/package.json"
   if [ ! -f "$manifest" ]; then
@@ -54,14 +59,15 @@ for lock in "${locks[@]}"; do
     continue
   fi
 
-  node "$fix" filter "$tmp/plan.json" "$RADAR_ALLOW_MAJOR" > "$tmp/filtered.json"
+  node "$fix" filter "$tmp/plan.json" "$RADAR_ALLOW_MAJOR" > "$tmp/filtered.json" || { failed=1; continue; }
   if [ "$(jq '.plan | length' "$tmp/filtered.json")" = 0 ]; then
     echo "No fixable vulnerabilities in $lock."
     continue
   fi
 
   node "$fix" apply "$manifest" "$tmp/filtered.json"
-  mapfile -t updates < <(jq -r '.plan[] | select(.strategy == "update") | .name' "$tmp/filtered.json")
+  updates=()
+  while IFS= read -r name; do updates+=("$name"); done < <(jq -r '.plan[] | select(.strategy == "update") | .name' "$tmp/filtered.json")
   if ! (cd "$dir" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund &&
         { [ "${#updates[@]}" = 0 ] || npm update "${updates[@]}" --package-lock-only --ignore-scripts --no-audit --no-fund; }); then
     echo "::error::npm could not update $lock."
@@ -85,6 +91,11 @@ for lock in "${locks[@]}"; do
   branch="offseq-radar/fix/$slug"
   [ "$branch" != "$default" ] || { echo "::error::Refusing to push to the default branch"; exit 1; }
   git add -- "$manifest" "$lock"
+  if git diff --cached --quiet; then
+    echo "$lock is already up to date."
+    git reset -q "$start"
+    continue
+  fi
   git commit -q -m "$title"
   git push -q --force origin "HEAD:refs/heads/$branch"
   git reset -q "$start"
@@ -99,7 +110,6 @@ for lock in "${locks[@]}"; do
   fi
   echo "Fix PR for $lock: $url"
   urls+=("$url")
-done
+done 3< <(jq -r '.files[].filename | select(test("(^|/)package-lock\\.json$"))' "$RADAR_FILES")
 
-echo "fix-prs=$(printf '%s\n' "${urls[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
 exit "$failed"

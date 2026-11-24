@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MAX_FILES, isPrintable, matcher, pickFiles } from './discovery.mjs';
 import { readExclude } from './config.mjs';
@@ -16,25 +16,31 @@ export function readAt(root, ref, path) {
 
 const listTracked = root => git(root, ['ls-files', '-z']).split('\0').filter(Boolean);
 
+// A symlink, or a path through one, could send any readable file, such as .git/config with the checkout token.
+const isPlainFile = (root, rel) => {
+  const abs = join(root, rel);
+  try { return lstatSync(abs).isFile() && realpathSync(abs) === abs; } catch { return false; }
+};
+
 export function selectFiles({ root, cwd, explicit, exclude }) {
-  if (!explicit.length) return pickFiles(listTracked(root), { exclude });
+  const plain = p => isPlainFile(root, p);
+  if (!explicit.length) return pickFiles(listTracked(root), { exclude }).filter(plain);
   cwd = realpathSync(cwd);
   let tracked;
   const out = new Set();
   for (const entry of explicit) {
+    const rel = relative(root, resolve(cwd, entry)).split(sep).join('/');
     if (/[*?]/.test(entry)) {
       tracked ??= listTracked(root);
-      const rel = relative(root, resolve(cwd, entry)).split(sep).join('/');
-      const hits = tracked.filter(matcher([rel])).filter(isPrintable);
+      const hits = tracked.filter(matcher([rel])).filter(p => isPrintable(p) && plain(p));
       if (!hits.length) throw new Error(`No tracked file matches ${entry}`);
       hits.forEach(h => out.add(h));
       continue;
     }
-    const abs = resolve(cwd, entry);
-    if (!existsSync(abs)) throw new Error(`File not found: ${entry}`);
-    const rel = relative(root, realpathSync(abs));
-    if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error(`${entry} is outside the repository`);
-    out.add(rel.split(sep).join('/'));
+    if (!existsSync(resolve(cwd, entry))) throw new Error(`File not found: ${entry}`);
+    if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw new Error(`${entry} is outside the repository`);
+    if (!plain(rel)) throw new Error(`${entry} is not a regular file (symlinks are not followed)`);
+    out.add(rel);
   }
   return [...out].sort();
 }
@@ -47,7 +53,7 @@ export function classify(head, base) {
 const MODE = f => (f.isNew ? 'new' : f.unchanged ? 'unchanged' : f.base ? 'changed' : 'full');
 
 export function prepare({ cwd, file, files, config, baseSha }) {
-  const root = git(cwd, ['rev-parse', '--show-toplevel']).trim();
+  const root = realpathSync(git(cwd, ['rev-parse', '--show-toplevel']).trim());
   if (isAbsolute(config) || config.split('/').includes('..')) throw new Error('config must be a path inside the repository');
   const configText = baseSha ? readAt(root, baseSha, config) : existsSync(resolve(root, config)) ? readFileSync(resolve(root, config), 'utf8') : null;
   const explicit = [file, ...files.split('\n')].map(s => s.trim()).filter(Boolean);

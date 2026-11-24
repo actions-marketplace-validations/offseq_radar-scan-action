@@ -25,9 +25,15 @@ bool fix-prs "$RADAR_FIX_PRS"
 bool allow-major "$RADAR_ALLOW_MAJOR"
 case "$RADAR_URL" in http://*|https://*) ;; *) die "api-url must start with https:// or http://" ;; esac
 [[ "$RADAR_BASE_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})?$ ]] || die "Unexpected base SHA"
+[[ "$RADAR_HEAD_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})?$ ]] || die "Unexpected head SHA"
 
 if [ -n "$RADAR_BASE_SHA" ]; then
-  git fetch --quiet --no-tags --depth=1 origin "$RADAR_BASE_SHA" || die "Could not fetch the pull request base $RADAR_BASE_SHA"
+  # Otherwise every file compares as unchanged and the gate passes vacuously (pull_request_target checks out the base).
+  if [ "$(git rev-parse HEAD)" != "$RADAR_HEAD_SHA" ] && ! git cat-file commit HEAD | grep -qx "parent $RADAR_HEAD_SHA"; then
+    die "The checked-out commit is not the pull request head or its merge commit. Check out the pull request (actions/checkout with ref: \${{ github.event.pull_request.head.sha }})."
+  fi
+  git cat-file -e "$RADAR_BASE_SHA^{commit}" 2>/dev/null ||
+    git fetch --quiet --no-tags --depth=1 origin "$RADAR_BASE_SHA" || die "Could not fetch the pull request base $RADAR_BASE_SHA"
 fi
 
 body="$RUNNER_TEMP/radar-body.json"

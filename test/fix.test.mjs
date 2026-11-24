@@ -37,7 +37,8 @@ test('filterMajors drops major upgrades and their manifest keys unless allowed',
   assert.match(out.skipped[1].reason, /allow-major/);
   assert.equal(plan.manifestPatch.overrides['minimist@0'], '1.2.6');
   assert.equal(filterMajors(plan, true).plan.length, 3);
-  assert.deepEqual(filterMajors({}, false), { plan: [], skipped: [], manifestPatch: {} });
+  assert.deepEqual(filterMajors({ success: true, data: { plan: [] } }, false), { plan: [], skipped: [], manifestPatch: {} });
+  assert.throws(() => filterMajors({ success: true }, false), /no plan/);
 });
 
 test('applyManifestPatch keeps indentation, key order and the trailing newline', () => {

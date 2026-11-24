@@ -34,8 +34,10 @@ const gte = (v, to) => {
 
 const ownsKey = (name, key) => key === name || key.startsWith(`${name}@`);
 
-export function filterMajors(result, allowMajor) {
-  const plan = result.plan ?? [];
+export function filterMajors(response, allowMajor) {
+  const result = Array.isArray(response?.plan) ? response : response?.data;
+  if (!Array.isArray(result?.plan)) throw new Error('The fix plan response has no plan');
+  const { plan } = result;
   const skipped = [...(result.skipped ?? [])];
   const patch = structuredClone(result.manifestPatch ?? {});
   if (allowMajor) return { plan, skipped, manifestPatch: patch };
@@ -146,23 +148,20 @@ export function describe(result, { lockfile, report }) {
 
 const readJson = p => JSON.parse(readFileSync(p, 'utf8'));
 
+const COMMANDS = {
+  filter: (planFile, allowMajor) => process.stdout.write(JSON.stringify(filterMajors(readJson(planFile), allowMajor === 'true'))),
+  apply: (manifest, planFile) => writeFileSync(manifest, applyManifestPatch(readFileSync(manifest, 'utf8'), readJson(planFile).manifestPatch)),
+  verify: (lockfile, planFile) => process.stdout.write(JSON.stringify(verify(readJson(lockfile), readJson(planFile)))),
+  describe: (planFile, lockfile, reportFile) =>
+    process.stdout.write(JSON.stringify(describe(readJson(planFile), { lockfile, report: reportFile ? readJson(reportFile) : null })))
+};
+
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [cmd, ...args] = process.argv.slice(2);
-  if (cmd === 'filter') {
-    const [planFile, allowMajor] = args;
-    process.stdout.write(JSON.stringify(filterMajors(readJson(planFile), allowMajor === 'true')));
-  } else if (cmd === 'apply') {
-    const [manifest, planFile] = args;
-    writeFileSync(manifest, applyManifestPatch(readFileSync(manifest, 'utf8'), readJson(planFile).manifestPatch));
-  } else if (cmd === 'verify') {
-    const [lockfile, planFile] = args;
-    process.stdout.write(JSON.stringify(verify(readJson(lockfile), readJson(planFile))));
-  } else if (cmd === 'describe') {
-    const [planFile, lockfile, reportFile] = args;
-    const report = reportFile ? readJson(reportFile) : null;
-    process.stdout.write(JSON.stringify(describe(readJson(planFile), { lockfile, report })));
-  } else {
-    console.error(`unknown command: ${cmd}`);
-    process.exit(2);
+  try {
+    COMMANDS[cmd](...args);
+  } catch (err) {
+    console.error(`::error::${String(err.message).replace(/[\r\n]+/g, ' ')}`);
+    process.exit(1);
   }
 }

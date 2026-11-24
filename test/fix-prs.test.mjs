@@ -24,7 +24,7 @@ const PLAN = {
   manifestPatch: { dependencies: { lodash: '^4.17.21' }, overrides: { 'minimist@0': '1.2.6' } }
 };
 
-async function setup({ planRoute = { status: 200, body: PLAN }, resolvedQs = '6.5.3', prList = '' } = {}) {
+async function setup({ planRoute = { status: 200, body: { success: true, data: PLAN } }, newLock = lock('4.17.21', '6.5.3'), prList = '' } = {}) {
   const remote = tmp();
   git(remote, 'init', '-q', '--bare', '-b', 'main');
   const root = repo();
@@ -36,7 +36,7 @@ async function setup({ planRoute = { status: 200, body: PLAN }, resolvedQs = '6.
   writeFileSync(files, JSON.stringify({ files: [{ filename: 'web/package-lock.json', mode: 'full' }, { filename: 'yarn.lock', mode: 'full' }] }));
   const report = join(scratch, 'report.json');
   writeFileSync(report, JSON.stringify({ data: { findings: [{ purl: 'pkg:npm/lodash@4.17.15', cveId: 'CVE-2021-23337', kev: true, exploited: true, file: 'web/package-lock.json' }] } }));
-  writeFileSync(join(scratch, 'new-lock.json'), lock('4.17.21', resolvedQs));
+  writeFileSync(join(scratch, 'new-lock.json'), newLock);
   const radar = await mockRadar({ '/api/v1/fix/plan': planRoute });
   const bin = stubBin([
     { match: '^gh api repos/acme/app --jq .default_branch$', stdout: 'main\n' },
@@ -44,7 +44,7 @@ async function setup({ planRoute = { status: 200, body: PLAN }, resolvedQs = '6.
     { match: '^gh pr create', stdout: 'https://github.com/acme/app/pull/9\n' },
     { match: '^gh pr edit', stdout: '' },
     { match: '^npm install --package-lock-only --ignore-scripts --no-audit --no-fund$', copy: [join(scratch, 'new-lock.json'), join(root, 'web/package-lock.json')] },
-    { match: '^npm update qs --package-lock-only --ignore-scripts', stdout: '' }
+    { match: '^npm update [^ ]+ --package-lock-only --ignore-scripts --no-audit --no-fund$', stdout: '' }
   ]);
   const env = {
     GH_TOKEN: 't', GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main', RADAR_API_KEY: 'k', RADAR_URL: radar.url,
@@ -91,7 +91,7 @@ test('opens one fix PR per npm lockfile from the default branch without touching
 });
 
 test('an existing fix PR is updated and unresolved upgrades are dropped', async () => {
-  const { root, radar, bin, env } = await setup({ resolvedQs: '6.5.2', prList: 'https://github.com/acme/app/pull/3\n' });
+  const { root, radar, bin, env } = await setup({ planRoute: { status: 200, body: PLAN }, newLock: lock('4.17.21', '6.5.2'), prList: 'https://github.com/acme/app/pull/3\n' });
   const r = await runScript('fix-prs.sh', { cwd: root, path: bin.dir, env });
   radar.close();
   assert.equal(r.code, 0, r.stdout + r.stderr);
@@ -118,7 +118,28 @@ test('only runs on the default branch outside pull requests', async () => {
     const r = await runScript('fix-prs.sh', { cwd: root, path: bin.dir, env: { ...env, ...extra } });
     assert.equal(r.code, 0);
     assert.match(r.stdout, /fix-prs runs on/);
+    assert.equal(r.outputs['fix-prs'], '[]');
   }
   radar.close();
   assert.equal(radar.requests.length, 0);
+});
+
+test('a lockfile npm leaves unchanged opens no PR', async () => {
+  const plan = { plan: [{ name: 'gone', from: '1.0.0', to: '1.0.1', direct: false, strategy: 'update', findings: ['CVE-1'] }], skipped: [], manifestPatch: {} };
+  const { root, remote, radar, bin, env } = await setup({ planRoute: { status: 200, body: plan }, newLock: lock('4.17.15', '6.5.2') });
+  const r = await runScript('fix-prs.sh', { cwd: root, path: bin.dir, env });
+  radar.close();
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /web\/package-lock\.json is already up to date/);
+  assert.equal(git(remote, 'branch', '--list', 'offseq-radar/*'), '');
+  assert.ok(bin.calls().some(c => c.bin === 'npm' && c.args.join(' ').startsWith('update gone ')));
+});
+
+test('a malformed plan response fails the step', async () => {
+  const { root, radar, bin, env } = await setup({ planRoute: { status: 200, body: { success: true } } });
+  const r = await runScript('fix-prs.sh', { cwd: root, path: bin.dir, env });
+  radar.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /::error::The fix plan response has no plan/);
+  assert.equal(git(root, 'status', '--porcelain'), '');
 });

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { commit, git, mockRadar, repo, runScript } from './helpers.mjs';
+import { commit, git, mockRadar, repo, runScript, tmp } from './helpers.mjs';
 
 const REPORT = {
   success: true,
@@ -20,21 +20,21 @@ const REPORT = {
 const inputs = (url, extra = {}) => ({
   RADAR_API_KEY: 'secret-key', RADAR_FILE: '', RADAR_FILES: '', RADAR_FAIL_ON: '', RADAR_GATE: '', RADAR_FAIL_ON_INCOMPLETE: 'true',
   RADAR_CONFIG: '.github/radar.yml', RADAR_COMMENT: '', RADAR_UPLOAD: 'true', RADAR_FIX_PRS: 'false', RADAR_ALLOW_MAJOR: 'false',
-  RADAR_URL: url, RADAR_BASE_SHA: '', RADAR_NO_SECRETS: 'false', ...extra
+  RADAR_URL: url, RADAR_BASE_SHA: '', RADAR_HEAD_SHA: '', RADAR_NO_SECRETS: 'false', ...extra
 });
 
 function prRepo() {
   const root = repo();
   const base = commit(root, { 'package-lock.json': '{"v":1}', 'go.mod': 'module a', '.github/radar.yml': 'failOn: high\n' });
-  commit(root, { 'package-lock.json': '{"v":2}', 'web/yarn.lock': 'y' });
+  const head = commit(root, { 'package-lock.json': '{"v":2}', 'web/yarn.lock': 'y' });
   git(root, 'remote', 'add', 'origin', root);
-  return { root, base };
+  return { root, base, head };
 }
 
 test('a pull request scan sends one diff request and reports the new findings', async () => {
   const radar = await mockRadar({ '/api/v1/scan': { status: 200, body: REPORT } });
-  const { root, base } = prRepo();
-  const r = await runScript('scan.sh', { cwd: root, env: inputs(radar.url, { RADAR_BASE_SHA: base }) });
+  const { root, base, head } = prRepo();
+  const r = await runScript('scan.sh', { cwd: root, env: inputs(radar.url, { RADAR_BASE_SHA: base, RADAR_HEAD_SHA: head }) });
   radar.close();
   assert.equal(r.code, 0, r.stdout + r.stderr);
   assert.equal(radar.requests.length, 1);
@@ -54,6 +54,34 @@ test('a pull request scan sends one diff request and reports the new findings', 
   assert.match(r.summary, /1 package\(s\) not fully evaluated: `pkg:npm\/big@1.0.0` \(candidate-cap\)/);
   assert.match(r.stdout, /go\.mod \(unchanged\), package-lock\.json \(changed\), web\/yarn\.lock \(new\)/);
   assert.ok(!(r.stdout + r.stderr).includes('secret-key'));
+  assert.equal(git(root, 'rev-parse', '--is-shallow-repository'), 'false');
+});
+
+test('a pull request base missing locally is fetched', async () => {
+  const radar = await mockRadar({ '/api/v1/scan': { status: 200, body: REPORT } });
+  const { root: upstream, base, head } = prRepo();
+  const clone = tmp();
+  git(clone, 'clone', '-q', '--depth=1', `file://${upstream}`, '.');
+  const r = await runScript('scan.sh', { cwd: clone, env: inputs(radar.url, { RADAR_BASE_SHA: base, RADAR_HEAD_SHA: head }) });
+  radar.close();
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.equal(radar.requests[0].body.files.find(f => f.filename === 'package-lock.json').base.content, '{"v":1}');
+});
+
+test('a merge-commit checkout passes the head check and a base checkout fails it', async () => {
+  const radar = await mockRadar({ '/api/v1/scan': { status: 200, body: REPORT } });
+  const { root, base, head } = prRepo();
+  git(root, 'checkout', '-q', '-b', 'merge', base);
+  commit(root, { 'other.txt': 'x' });
+  git(root, 'merge', '-q', '--no-ff', '-m', 'merge', head);
+  const merged = await runScript('scan.sh', { cwd: root, env: inputs(radar.url, { RADAR_BASE_SHA: base, RADAR_HEAD_SHA: head }) });
+  assert.equal(merged.code, 0, merged.stdout + merged.stderr);
+  git(root, 'checkout', '-q', base);
+  const r = await runScript('scan.sh', { cwd: root, env: inputs(radar.url, { RADAR_BASE_SHA: base, RADAR_HEAD_SHA: head }) });
+  radar.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /not the pull request head/);
+  assert.equal(radar.requests.length, 1);
 });
 
 test('explicit fail-on and gate win over the config through the query', async () => {
