@@ -90,7 +90,7 @@ The action keeps a single comment, marked `<!-- offseq-radar-scan -->`, and edit
 failOn: high              # critical | high | medium | low | kev | exploited | act-now
 gate: new                 # new | all
 ignore:
-  - id: CVE-2024-1234     # CVE, GHSA or RADAR- id
+  - id: CVE-2024-1234     # CVE or RADAR- id
     package: pkg:npm/lodash   # optional, versionless purl prefix
     reason: not reachable     # required
     until: 2027-01-01         # optional; expired entries stop applying
