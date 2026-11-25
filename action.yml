@@ -1,5 +1,5 @@
 name: OffSeq Radar scan
-description: Check an SBOM or lockfile against OffSeq Threat Radar, upload SARIF to code scanning and gate the build.
+description: Check lockfiles and SBOMs against OffSeq Threat Radar, comment new vulnerabilities on pull requests, upload SARIF, gate the build and open fix PRs.
 author: OffSeq
 branding:
   icon: shield
@@ -11,20 +11,49 @@ inputs:
     required: false
     default: ''
   file:
-    description: SBOM or lockfile to scan, e.g. package-lock.json, yarn.lock, poetry.lock, go.sum, bom.cdx.json.
-    required: true
+    description: A single SBOM or lockfile to scan. Leave file and files empty to discover every supported file tracked in the repository.
+    required: false
+    default: ''
+  files:
+    description: Newline-separated paths or globs of SBOMs and lockfiles to scan, relative to the workspace.
+    required: false
+    default: ''
   fail-on:
-    description: Fail the job on a confirmed finding at this level - critical, high, medium, low, kev or exploited. Empty never fails.
+    description: Fail the job on a confirmed finding at this level - critical, high, medium, low, kev, exploited or act-now. Empty uses failOn from the config, else never fails.
+    required: false
+    default: ''
+  gate:
+    description: Which findings the gate counts - new (introduced by the pull request) or all. Empty uses the config, else new on pull requests and all otherwise.
     required: false
     default: ''
   fail-on-incomplete:
     description: Fail the job when the gate could not evaluate every package, so an incomplete scan never passes.
     required: false
     default: 'true'
+  config:
+    description: Path of the Radar config in the repository. On pull requests it is read from the base commit, so a pull request cannot loosen its own gate.
+    required: false
+    default: .github/radar.yml
+  comment:
+    description: Keep one comment on the pull request with the findings (needs pull-requests write). Empty means true on pull requests.
+    required: false
+    default: ''
   upload-sarif:
     description: Upload the SARIF report to GitHub code scanning (needs security-events write permission).
     required: false
     default: 'true'
+  fix-prs:
+    description: On push, schedule or workflow_dispatch on the default branch, open a pull request per npm lockfile that upgrades vulnerable packages (paid Radar plans; needs contents and pull-requests write).
+    required: false
+    default: 'false'
+  allow-major:
+    description: Let fix PRs cross a semver major version.
+    required: false
+    default: 'false'
+  github-token:
+    description: Token for the pull request comment and fix PRs.
+    required: false
+    default: ${{ github.token }}
   api-url:
     description: Radar base URL.
     required: false
@@ -37,11 +66,23 @@ outputs:
   gate-incomplete:
     description: '"true" when the gate could not evaluate every package.'
     value: ${{ steps.scan.outputs.gate-incomplete }}
+  new-findings:
+    description: Number of findings the pull request introduces.
+    value: ${{ steps.scan.outputs.new-findings }}
+  resolved-findings:
+    description: Number of findings the pull request fixes.
+    value: ${{ steps.scan.outputs.resolved-findings }}
   sarif-file:
     description: Path of the SARIF report, when upload-sarif is true.
     value: ${{ steps.scan.outputs.sarif-file }}
+  comment-url:
+    description: URL of the pull request comment, when one was written.
+    value: ${{ steps.comment.outputs.comment-url }}
+  fix-prs:
+    description: JSON list of the fix pull request URLs opened or updated.
+    value: ${{ steps.fix.outputs.fix-prs }}
   skipped:
-    description: '"true" when the scan was skipped for want of an API key.'
+    description: '"true" when the scan was skipped for want of an API key or of files to scan.'
     value: ${{ steps.scan.outputs.skipped }}
 
 runs:
@@ -52,49 +93,20 @@ runs:
       env:
         RADAR_API_KEY: ${{ inputs.api-key }}
         RADAR_FILE: ${{ inputs.file }}
+        RADAR_FILES: ${{ inputs.files }}
         RADAR_FAIL_ON: ${{ inputs.fail-on }}
+        RADAR_GATE: ${{ inputs.gate }}
+        RADAR_FAIL_ON_INCOMPLETE: ${{ inputs.fail-on-incomplete }}
+        RADAR_CONFIG: ${{ inputs.config }}
+        RADAR_COMMENT: ${{ inputs.comment }}
         RADAR_UPLOAD: ${{ inputs.upload-sarif }}
+        RADAR_FIX_PRS: ${{ inputs.fix-prs }}
+        RADAR_ALLOW_MAJOR: ${{ inputs.allow-major }}
         RADAR_URL: ${{ inputs.api-url }}
+        RADAR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        RADAR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         RADAR_NO_SECRETS: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.actor == 'dependabot[bot]') }}
-      run: |
-        set -euo pipefail
-        if [ -z "$RADAR_API_KEY" ]; then
-          # Fail closed: a missing secret anywhere else must not pass the gate.
-          [ "$RADAR_NO_SECRETS" = true ] || { echo "::error::api-key is empty. Set the RADAR_API_KEY secret."; exit 1; }
-          echo "::warning::No Radar API key (secrets are not passed to fork or Dependabot pull requests); skipping the scan."
-          echo "skipped=true" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        case "$RADAR_FAIL_ON" in
-          ''|critical|high|medium|low|kev|exploited) ;;
-          *) echo "::error::fail-on must be critical, high, medium, low, kev, exploited or empty, not '$RADAR_FAIL_ON'"; exit 1 ;;
-        esac
-        [ -f "$RADAR_FILE" ] || { echo "::error::File not found: $RADAR_FILE"; exit 1; }
-        body="$RUNNER_TEMP/radar-body.json"
-        out="$RUNNER_TEMP/radar-scan.json"
-        # Repo-relative, so SARIF locations link to the file in code scanning.
-        file="$(cd "$(dirname "$RADAR_FILE")" && pwd -P)/$(basename "$RADAR_FILE")"
-        filename="${file#"$(cd "$GITHUB_WORKSPACE" && pwd -P)/"}"
-        jq -n --rawfile content "$RADAR_FILE" --arg filename "$filename" '{content: $content, filename: $filename}' > "$body"
-
-        status=$(curl -sS -o "$out" -w '%{http_code}' -X POST \
-          "$RADAR_URL/api/v1/scan?format=all${RADAR_FAIL_ON:+&failOn=$RADAR_FAIL_ON}" \
-          -H "X-API-Key: $RADAR_API_KEY" -H 'Content-Type: application/json' --data-binary "@$body")
-        if [ "$status" != 200 ]; then
-          echo "::error::Radar scan failed (HTTP $status): $(jq -r '.message // .error // empty' "$out" 2>/dev/null || true)"
-          exit 1
-        fi
-
-        jq -r '.markdown' "$out" >> "$GITHUB_STEP_SUMMARY"
-        jq -r '(.data.truncated // []) as $t | select($t | length > 0) |
-          "\n**Incomplete:** \($t | length) package(s) not fully evaluated: \($t | map("`\(.purl)` (\(.reason))") | join(", "))."' "$out" >> "$GITHUB_STEP_SUMMARY"
-        echo "gate-tripped=$(jq -r '.data.gate.tripped == true' "$out")" >> "$GITHUB_OUTPUT"
-        echo "gate-incomplete=$(jq -r '.data.gate.incomplete == true' "$out")" >> "$GITHUB_OUTPUT"
-
-        if [ "$RADAR_UPLOAD" = true ]; then
-          jq '.sarif' "$out" > "$RUNNER_TEMP/radar.sarif"
-          echo "sarif-file=$RUNNER_TEMP/radar.sarif" >> "$GITHUB_OUTPUT"
-        fi
+      run: bash "$GITHUB_ACTION_PATH/scripts/scan.sh"
 
     - if: steps.scan.outputs.sarif-file != ''
       uses: github/codeql-action/upload-sarif@v4
@@ -102,12 +114,38 @@ runs:
         sarif_file: ${{ steps.scan.outputs.sarif-file }}
         category: offseq-radar
 
+    - id: comment
+      if: steps.scan.outputs.report != '' && github.event.pull_request.number && inputs.comment != 'false'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RADAR_PR: ${{ github.event.pull_request.number }}
+        RADAR_REPORT: ${{ steps.scan.outputs.report }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/comment.sh"
+
+    - id: fix
+      if: steps.scan.outputs.report != '' && inputs.fix-prs == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RADAR_API_KEY: ${{ inputs.api-key }}
+        RADAR_URL: ${{ inputs.api-url }}
+        RADAR_CONFIG: ${{ inputs.config }}
+        RADAR_ALLOW_MAJOR: ${{ inputs.allow-major }}
+        RADAR_FILES: ${{ steps.scan.outputs.files }}
+        RADAR_REPORT: ${{ steps.scan.outputs.report }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/fix-prs.sh"
+
     - if: steps.scan.outputs.gate-tripped == 'true'
       shell: bash
       env:
         RADAR_FAIL_ON: ${{ inputs.fail-on }}
+        RADAR_REPORT: ${{ steps.scan.outputs.report }}
       run: |
-        echo "::error::OffSeq Radar found a confirmed $RADAR_FAIL_ON finding. See the job summary."
+        jq -r '.data.gate as $g | "fail-on=\($g.failOn // env.RADAR_FAIL_ON)" as $l |
+          if $g.counted == null then "::error::OffSeq Radar found a confirmed finding matching \($l). See the job summary."
+          elif $g.scope == "new" then "::error::OffSeq Radar: this pull request introduces \($g.counted) new confirmed finding(s) matching \($l). See the job summary."
+          else "::error::OffSeq Radar found \($g.counted) confirmed finding(s) matching \($l). See the job summary." end' "$RADAR_REPORT"
         exit 1
 
     - if: steps.scan.outputs.gate-incomplete == 'true' && inputs.fail-on-incomplete == 'true'

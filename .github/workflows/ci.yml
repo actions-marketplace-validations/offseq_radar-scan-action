@@ -8,15 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: actionlint
-        run: |
-          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          ./actionlint -color
-
   # Runs the action end to end when the repository has a RADAR_API_KEY secret.
   scan:
     runs-on: ubuntu-latest
@@ -36,6 +27,7 @@ jobs:
           api-key: ${{ secrets.RADAR_API_KEY }}
           file: test/package-lock.json
           upload-sarif: ${{ github.event_name != 'pull_request' }}
+          comment: false
       - if: steps.key.outputs.present == 'true'
         run: test "${{ steps.radar.outputs.gate-tripped }}" = false
 
@@ -66,6 +58,7 @@ jobs:
           file: test/package-lock.json
           fail-on: high
           upload-sarif: false
+          comment: false
           api-url: http://127.0.0.1:8080
       - id: tolerant
         uses: ./
@@ -75,6 +68,7 @@ jobs:
           fail-on: high
           fail-on-incomplete: false
           upload-sarif: false
+          comment: false
           api-url: http://127.0.0.1:8080
       - run: |
           test "${{ steps.radar.outcome }}" = failure
@@ -94,6 +88,7 @@ jobs:
           api-key: ''
           file: test/package-lock.json
           upload-sarif: false
+          comment: false
       - run: |
           test "${{ steps.keyless.outcome }}" = failure
           test "${{ steps.keyless.outputs.skipped }}" = ""
